@@ -1,0 +1,296 @@
+libname pmlr develop;
+	data annuity;
+		set pmlr.develop;
+	run;
+
+%let inputs=acctage dda ddabal dep depamt cashbk checks dirdep nsf   nsfamt phone teller atm atmamt pos posamt cd cdbal ira irabal loc locbal inv invbal ils ilsbal mm mmbal mmcred mtg mtgbal sav savbal cc ccbal ccpurc sdb income hmown lores hmval age crscore moved inarea; 
+
+proc means data=annuity n nmiss mean min max;
+	var &inputs;
+run;
+
+proc freq data=annuity;
+	tables ins branch res;
+run;
+
+proc logistic data=annuity plots(only)=effect(clband x= (ddabal depamt checks res)) oddsratio (type=horizontalstat));
+	class res (param=ref ref=’S’);
+	model ins(event=’1’)=dda ddabal dep depamt cashbk checks res / stb      clodds=p1;
+	units ddabal=1000 depamt=1000 / default=1;
+	oddsratio ‘Comparisons of Residential Classification’ res / diff=all cl=p1;
+run;
+
+proc logistic data=annuity;
+	model ins(event=’1’)=dda ddabal dep depamt cashbk checks;
+	score data=pmlr.new out=scored;
+run;
+
+proc print data=scored(obs=10);
+	var p_1 dda ddabal dep depamt cashbk checks;
+run;
+%let pi1=.02  /*supply the prior for class 1*/
+
+proc logistic data=annuity;
+	model ins(‘event’=1)=dda ddabal dep depamt cashbk checks;
+	score data=pmlr.new out=scored priorevent=&pi1;
+run;
+
+proc print data=scored(obs=10);
+	var p_1 dda ddabal dep depamt cashbk checks;
+run;
+
+proc print data=annuity(obs=15);
+	var ccbal ccpurc income hmown;
+run;
+
+data annuity1;
+	set annuity;
+	array mi{*} MIAcctAg MIPhone MIPOS MIPOSAmt MIInv MIInvBal MICC  MICCBal MICCPurc MIIncome MIHMOwn MILORes MIHMVal MIAge MICRScor;
+	array x{*} acctage phone pos posamt inv invbal cc ccbal ccpurc income hmown lores hmval age crscore;
+	do i=1 to dim(mi);
+		mi{i}=(x{i}=.);
+	end;
+run;
+
+proc stdize data=annuity1
+		reponly
+		method=median
+		out=imputed;
+	var &inputs;
+run;
+
+proc print data=imputed(obs=12);
+	var ccbal miccbal ccpurc miccpurc income miincome hmown mihmown;
+run;
+
+proc means data=imputed noprint nway;
+	class branch;
+	var ins;
+	output out=level mean=prop;
+run;
+
+proc print data=level;
+run;
+	
+ods output clusterhistory=cluster;
+
+proc cluster data=level method=ward outtree=fortree
+		plots=(dendogram(vertical height=rsq);
+	freq _freq_;
+	var prop;
+	id branch;
+run;
+
+proc freq data=imputed noprint;
+	tables branch*ins / chisq;
+	output out=chi (keep=_pchi_) chisq;
+run;
+
+data cutoff;
+	if _n_=1 then set chi;
+	set cluster;
+	chisquare=_pchi_*rsquared;
+	degfree=numberofclusters-1;
+	logpvalue=logsdf(‘CHISQ’,chisquare,degfree);
+run;
+
+proc sgplot data=cutoff;
+	scatter y=logpvalue  x=numberofclusters / markerattrs=(color=blue symbol=circlefilled);
+	xaxis label=”Number Of Clusters”;
+	yaxis label=”Log Of P-Value”min=-170 max=-130;
+	title “Plot of the log of the P-Value by Number Of Clusters.”;
+run;
+
+proc sql;
+	select NumberOfClusters into :ncl
+	from cutoff
+	having logpvalue=min(logpvalue);
+quit;
+
+ods html close;
+proc tree data=fortree nclusters=&ncl out=clus;
+	id branch;
+run;
+ods html;
+
+proc sort data=clus;
+	by clusname;
+run;
+
+proc print data=clus;
+	by clusname;
+	id clusname;
+run;
+data imputed;
+	set imputed;
+brclus1=(branch in(‘B6’, ‘B9’, ‘B19’, ‘B8’, ‘B1’, ‘B17’, ‘B3’, ‘B5’, ‘B13’, ‘B12’, ‘B4’, ‘B10’));
+		brclus2=(branch=’B15’);
+		brclus3=(branch=’B16’);
+		brclus4=(branch=’B14’);
+run;
+
+proc varclus data=imputed maxeigen=.7 hi short plots=dendogram;
+var &inputs brclus1-brclus4 miacctag miphone mipos miposamt mimiinv   miinvbal micc miccbal miccpurc miincome mihmown milores mihmval miage micrscor;
+	title “Variable Clustering Of Imputed Data Set”;
+run;
+
+ods html close;
+ods output clusterquality=summary rsquare=clusters;
+
+proc varclus data=imputed maxeigen=.7 short hi;
+var &inputs brclus1-brclus4 miacctag miphone mipos miposamt mimiinv   miinvbal micc miccbal miccpurc miincome mihmown milores mihmval miage micrscor;
+run;
+ods html;
+
+data _null_;
+	set summary;
+	call symput(‘nvar’,compress(NumberOfClusters));
+run;
+
+proc print data=clusters noobs;
+	where NumberOfClusters=&nvar;
+	var Cluster Variable RSquaredRatio VariableLabel;
+run;
+
+%let reduced=brclus2 miincome checks ccbal mmbal income ilsbal posamt nsfamt cd irabal age loc sav dda invbal crscore brclus3 cc brclus1 cashbk miacctag micrscor moved acctage dirdep savbal ddabal sdb ccpurc inarea atmamt phone mmcred hmown inv depamt brclus4 atm lores mtg;
+
+ods html close;
+ods output spearmancorr=spearman hoeffdingcorr=hoeffding;
+
+proc corr data=imputed spearman hoeffding rank;
+	var &reduced;
+	with ins;
+run; 
+ods html;
+
+data spearman1(keep=variable scorr spvalue ranksp);
+	length variable $ 8;
+	set spearman;
+	array best(*) best1--best&nvar;
+	array r(*) r1--r&nvar;
+	array p(*) p1--p&nvar;
+		do i=1 to dim(best);
+			variable=best(i);
+			scorr=r(i);
+			spvalue=p(i);
+			ranksp=i;
+		output;
+	end;
+run;
+	
+data hoeffding1(keep=variable hcorr hpvalue rankhp);
+	length variable $ 8;
+	set spearman;
+	array best(*) best1--best&nvar;
+	array r(*) r1--r&nvar;
+	array p(*) p1--p&nvar;
+		do i=1 to dim(best);
+			variable=best(i);
+			scorr=r(i);
+			spvalue=p(i);
+			ranksp=i;
+		output;
+	end;
+run;
+
+proc sort data=spearman1;
+	by variable;
+run;
+
+proc sort data=hoeffding1;
+	by variable;
+run;
+
+data correlations;
+	merge spearman1 hoeffding1;
+	by variable;
+run;
+
+proc sort data=correlations;
+	by ranksp;
+run;
+proc print data=correlations label split=’*’;
+	var variable ranksp rancho scorr spvalue hcorr hpvalue;
+	label ranksp=’Spearman rank* of variables’;
+	      scorr=’Spearman Correlation’;
+        spvalue=’Spearman p-value’;
+        rankho=’Hoeffding rank* of variables’;
+        hcorr=’Hoeffding Correlation’;
+	      hpvalue=’Hoeffding p-value’;
+	title “Rank of spearman correlations and hoeffding correlations”;
+run;
+
+proc sql noprint;
+	select min(ranksp) into :vref
+		from (select ranksp 
+			from correlations
+			having spvalue > .5);
+	select min(rankho) into :href
+		from (select rankho 
+			from correlations
+			having hpvalue > .5);
+quit;
+
+proc sgplot data=correlations;
+	refline &vref / axis=y;
+	refline &href / axis=x;
+	scatter y=ranksp x=rancho / datalabel=variable;
+	yaxis label=”Rank of Speraman”;
+	xaxis label=”Rank of Hoeffding”;
+	title “Scatter Plot of the ranks of spearman vs hoeffding”;
+run;
+
+%let screened=brclus2 checks ccbal mmbal income ilsbal posamt nsfamt cd irabal age sav dda invbal crscore brclus3 cc brclus1 cashbk miacctag micrscor moved acctage dirdep savbal ddabal sdb ccpurc inarea atmamt phone mmcred inv depamt brclus4 atm lores;
+
+%let var=DDABal;
+
+proc rank data=imputed groups=100 out=out;
+	var &var;
+	ranks bin;
+run;
+
+proc print data=out(obs=10);
+	var &var bin;
+run;
+
+
+proc means data=out noprint nway;
+	class bin;
+	var ins &var;
+	output out=bins sum(ins)=ins mean(&var)=&var;
+run;
+
+proc print data=bins(obs=10);
+run;
+
+data bins;
+	set bins;
+		elogit=log((ins+(sqrt(_FREQ_)/2))/(_FREQ_-ins+(sqrt(_FREQ_)/2)));
+run;
+
+proc sgplot data=bins;
+	reg y=elogit x=&var / 
+		curvelabel=”Liner Relationship?”
+		curvelabelloc=outside
+		lineattrs=(color=ligr);
+	series y=elogit x=&var;
+	title “Empheriacl Logit against &var”;
+run;
+
+%let screened=brclus2 checks ccbal mmbal income ilsbal posamt nsfamt cd irabal age sav dda invbal crscore brclus3 cc brclus1 cashbk miacctag micrscor moved acctage dirdep savbal B_DDABAL sdb ccpurc inarea atmamt phone mmcred inv depamt brclus4 atm lores;
+
+proc logistic data=imputed plots(only)=oddsratio (type=horizontalstat);
+	class res (param=ref ref=’S’);
+	model ins(event=’1’)=&screened res / clodds=p1
+		selection=backward fast slstay=0.01;
+run;
+
+data imputed;
+	set imputed;
+	resr=(res=’R’);
+	resu=(res=’U’);
+run;
+
+proc logistic data=imputed;
+	model ins(event=’1’)=&screened resr resu / selection=score best=1;
+run;             
